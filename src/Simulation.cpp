@@ -1,6 +1,118 @@
 #include "Simulator.h"
 #include "util_sim.h"
 
+static std::string trim_copy(std::string s)
+{
+    size_t first = s.find_first_not_of("\t\n\r ");
+    if (first == std::string::npos)
+        return "";
+    size_t last = s.find_last_not_of("\t\n\r ");
+    return s.substr(first, last - first + 1);
+}
+
+void Simulator::set_multi_initial_states(std::string init_states)
+{
+    std::string line;
+    std::stringstream inFile_ss(init_states);
+    std::set<std::string> seen;
+
+    while (getline(inFile_ss, line))
+    {
+        line = line.substr(0, line.find("//"));
+        line = line.substr(0, line.find("#"));
+        line = trim_copy(line);
+        if (line == "")
+            continue;
+
+        std::stringstream line_ss(line);
+        std::string label, entry;
+        std::vector<std::string> entries;
+        line_ss >> label;
+        while (line_ss >> entry)
+            entries.push_back(entry);
+        if (label == "" || entries.empty())
+        {
+            std::cerr << "[warning]: Initial-state line '" << line << "' is ignored. Expected: <label> <bitstring> or <label> <amp0> <amp1> ..." << std::endl;
+            continue;
+        }
+        if (label == "all")
+        {
+            std::cerr << "[warning]: Initial-state label 'all' is reserved. The line is ignored." << std::endl;
+            continue;
+        }
+        if (seen.find(label) != seen.end())
+        {
+            std::cerr << "[warning]: Initial-state label '" << label << "' is duplicated. The later line is ignored." << std::endl;
+            continue;
+        }
+        bool sparse_state = false;
+        for (std::string& e : entries)
+            if (e.find(':') != std::string::npos)
+                sparse_state = true;
+        bool basis_state = entries.size() == 1 && !sparse_state;
+        bool legal = true;
+        if (basis_state)
+        {
+            for (char c : entries[0])
+            {
+                if (c != '0' && c != '1')
+                {
+                    legal = false;
+                    basis_state = false;
+                    break;
+                }
+            }
+        }
+        if (!legal && entries.size() == 1 && !sparse_state)
+        {
+            std::cerr << "[warning]: Initial-state line '" << line << "' is ignored. Single-entry states must be bitstrings." << std::endl;
+            continue;
+        }
+        seen.insert(label);
+        multiInitLabels.push_back(label);
+        multiInitEntries.push_back(entries);
+        if (!basis_state || sparse_state)
+            hasArbitraryInit = true;
+    }
+
+    if (multiInitLabels.empty())
+        return;
+
+    multiLabelBits = 0;
+    int capacity = 1;
+    while (capacity < multiInitLabels.size())
+    {
+        capacity *= 2;
+        multiLabelBits++;
+    }
+    initScaleBits = std::max(0, std::min(24, r - 2));
+}
+
+void Simulator::set_selected_initial_states(std::string selection)
+{
+    selection = trim_copy(selection);
+    if (selection == "" || selection == "all")
+        return;
+
+    std::stringstream selection_ss(selection);
+    std::string label;
+    while (getline(selection_ss, label, ','))
+    {
+        label = trim_copy(label);
+        if (label != "")
+            selectedInitLabels.push_back(label);
+    }
+}
+
+void Simulator::set_obs_file(std::string obsfile)
+{
+    this->obsfile = obsfile;
+}
+
+void Simulator::set_bdd_dump_prefix(std::string prefix)
+{
+    bddDumpPrefix = prefix;
+}
 
 /**Function*************************************************************
 
@@ -16,13 +128,53 @@
 void Simulator::init_simulator(int nQubits)
 {
     n = nQubits; // set the number n here
-    manager = Cudd_Init(n, n, CUDD_UNIQUE_SLOTS, CUDD_CACHE_SLOTS, 0);
-    int *constants = new int[n];
-    for (int i = 0; i < n; i++)
-        constants[i] = 0; // TODO: costom initial state
+    manager = Cudd_Init(n + multiLabelBits, n + multiLabelBits, CUDD_UNIQUE_SLOTS, CUDD_CACHE_SLOTS, 0);
     measured_qubits_to_clbits = std::vector<std::vector<int>>(n, std::vector<int>(0));
-    init_state(constants);
-    delete[] constants;
+    if (has_multi_initial_states())
+    {
+        for (int i = 0; i < multiInitEntries.size(); i++)
+        {
+            std::vector<std::string>& entries = multiInitEntries[i];
+            bool sparse_state = false;
+            for (std::string& e : entries)
+                if (e.find(':') != std::string::npos)
+                    sparse_state = true;
+            if (entries.size() == 1 && !sparse_state && entries[0].length() != n)
+            {
+                std::cerr << "[Error]: Initial state '" << entries[0] << "' has length " << entries[0].length() << ", but qreg has " << n << " qubits." << std::endl;
+                assert(entries[0].length() == n);
+            }
+            if (!sparse_state && entries.size() != 1)
+            {
+                if (n >= 63)
+                {
+                    std::cerr << "[Error]: Dense amplitude initial state '" << multiInitLabels[i] << "' is too large for " << n << " qubits. Use sparse entries like <bitstring>:<amplitude>." << std::endl;
+                    assert(n < 63);
+                }
+                unsigned long long nEntries = 1ULL << n;
+                if (entries.size() != nEntries)
+                {
+                    std::cerr << "[Error]: Initial state '" << multiInitLabels[i] << "' has " << entries.size() << " amplitudes, but qreg with " << n << " qubits requires " << nEntries << "." << std::endl;
+                    assert(entries.size() == nEntries);
+                }
+            }
+        }
+        if (hasArbitraryInit)
+        {
+            k = 2 * initScaleBits;
+        }
+        init_multi_state();
+        dump_all_bdds("initial_multi_input");
+    }
+    else
+    {
+        int *constants = new int[n];
+        for (int i = 0; i < n; i++)
+            constants[i] = 0; // TODO: costom initial state
+        init_state(constants);
+        delete[] constants;
+        dump_all_bdds("initial_input");
+    }
     if (isReorder) Cudd_AutodynEnable(manager, CUDD_REORDER_SYMM_SIFT);
 }
 
@@ -254,6 +406,84 @@ void Simulator::sim_qasm(std::string qasm)
 {
     sim_qasm_file(qasm); // simulate
 
+    if (has_multi_initial_states())
+    {
+        if (sim_type == 0 && isMeasure == 0)
+        {
+            std::cerr << "[Error]: no measurement detected. Cannot do sampling." << std::endl;
+            assert(sim_type != 0 || isMeasure != 0);
+        }
+        if (sim_type == 1 && isMeasure == 1 && shots != 1)
+        {
+            shots = 1;
+            std::cerr << "[Warning]: shot number is limited to 1 in all_amplitude mode." << std::endl;
+        }
+
+        if (bddDumpPrefix != "")
+        {
+            dump_all_bdds("final_multi_state");
+            create_bigBDD();
+            dump_big_bdd("final_merged_all_in_one");
+            Cudd_RecursiveDeref(manager, bigBDD);
+            bigBDD = nullptr;
+        }
+
+        for (std::string label : labels_to_access())
+        {
+            if (!select_initial_state(label))
+                continue;
+
+            if (sim_type == 0)
+            {
+                create_bigBDD();
+                dump_big_bdd("final_merged_" + label);
+                measurement();
+                print_results(label);
+                if (obsfile != "")
+                {
+                    std::cout << "\"initial_state\": \"" << label << "\"" << std::endl;
+                    measurement_obs(obsfile);
+                }
+            }
+            else if (sim_type == 1)
+            {
+                if (isMeasure || isQuery)
+                {
+                    create_bigBDD();
+                    dump_big_bdd("final_merged_" + label);
+                    if (isMeasure)
+                        measurement();
+                }
+                getStatevector();
+                print_results(label);
+                if (obsfile != "")
+                {
+                    std::cout << "\"initial_state\": \"" << label << "\"" << std::endl;
+                    measurement_obs(obsfile);
+                }
+            }
+            else if (sim_type == 2)
+            {
+                create_bigBDD();
+                dump_big_bdd("final_merged_" + label);
+                if (obsfile != "")
+                {
+                    std::cout << "\"initial_state\": \"" << label << "\"" << std::endl;
+                    measurement_obs(obsfile);
+                }
+            }
+            else
+            {
+                std::cerr << "[Error]: unknown sim_type." << std::endl;
+                exit(-1);
+            }
+
+            reset_access_state();
+            restore_multi_state();
+        }
+        return;
+    }
+
     if (sim_type == 0 && isMeasure == 0)
     {
         std::cerr << "[Error]: no measurement detected. Cannot do sampling." << std::endl;
@@ -284,26 +514,43 @@ void Simulator::sim_qasm(std::string qasm)
     if (sim_type == 0) // sampling mode
     {
         create_bigBDD();
+        dump_big_bdd("final_merged");
         measurement();
         print_results();
+        if (obsfile != "")
+            measurement_obs(obsfile);
     }
     else if (sim_type == 1) // all_amplitude mode
     {
         if (isMeasure)
         {
             create_bigBDD();
+            dump_big_bdd("final_merged");
             measurement();
         }
         else if (isQuery)
         {
             create_bigBDD();
+            dump_big_bdd("final_merged");
+        }
+        else if (bddDumpPrefix != "")
+        {
+            create_bigBDD();
+            dump_big_bdd("final_merged");
+            Cudd_RecursiveDeref(manager, bigBDD);
+            bigBDD = nullptr;
         }
         getStatevector();
         print_results();
+        if (obsfile != "")
+            measurement_obs(obsfile);
     }
     else if (sim_type == 2)
     {
         create_bigBDD();
+        dump_big_bdd("final_merged");
+        if (obsfile != "")
+            measurement_obs(obsfile);
     }
     else
     {
@@ -325,7 +572,7 @@ void Simulator::sim_qasm(std::string qasm)
   SeeAlso     []
 
 ***********************************************************************/
-void Simulator::print_results()
+void Simulator::print_results(std::string label)
 {
     // write output string based on state_count and statevector
     std::unordered_map<std::string, int>::iterator it;
@@ -346,5 +593,8 @@ void Simulator::print_results()
 
     run_output += (statevector != "null") ? "\"statevector\": " + statevector + " }" : " }";
     //return;
-    std::cout << run_output << std::endl;
+    if (label == "")
+        std::cout << run_output << std::endl;
+    else
+        std::cout << "{\"initial_state\": \"" << label << "\", \"result\": " << run_output << "}" << std::endl;
 }

@@ -33,6 +33,20 @@ Options:
                       2: query mode, where only the values of properties defined in obs_file will be provided.
 --shots arg (=1)      the number of outcomes being sampled in "sampling mode" .
 --obs_file arg        self-defined measurement operation file string (if any).
+--init_states arg     multi-initial-state file. Each non-comment line is:
+                      <label> <bitstring>, <label> <amp0> <amp1> ...,
+                      or sparse entries <label> <bitstring>:<amp> ...
+--select_init arg (=all)
+                      initial-state label(s) to access after simulation. Use
+                      'all' or comma-separated labels.
+--sequential_init     run selected initial states one by one instead of using
+                      selector variables. Useful for verification.
+--verify_init         run both all-in-one and sequential initial-state modes,
+                      then compare their output.
+--verify_tol arg (=1e-09)
+                      probability tolerance for --verify_init counts comparison.
+--dump_bdds arg       write BDD Graphviz .dot dumps using the given filename
+                      prefix.
 --r arg (=32)         integer bit size.
 --reorder arg (=1)    allow variable reordering or not.
                       0: disable reordering.
@@ -40,9 +54,92 @@ Options:
 --alloc arg (=1)      allocate new BDDs when overflow is detected.
                       0: do not allocate new BDDs. This may lead to numerical errors.
                       1: allocate new BDDs (default option).
-
+./SliQSim --sim_qasm examples/bell_state.qasm --type 1 \
+  --init_states init_states.txt \
+  --dump_bdds /tmp/sliqsim_bdd
 ```
 To use the sampling mode (default), it is required to have measurement operations included in the qasm file. Conversely, in all_amplitude mode, measurement operations are generally omitted, but if they are present in the qasm file, the final state vector will collapse based on the measurement result. It is important to note that all_amplitude mode is not recommended for simulations involving a large number of qubits, as it could result in a significantly long runtime.
+
+## Multi-Initial-State Simulation
+
+SliQSim can simulate multiple labeled initial states together through the same circuit. Each non-comment line in the initial-state file can be either a computational-basis bitstring or a full statevector written in computational-basis order:
+
+```text
+zero 00
+one 01
+plus 0.70710678118 0.70710678118
+i_state 0 1i
+sparse_plus 000:0.70710678118 111:0.70710678118
+```
+
+Then run with `--init_states`. By default, SliQSim accesses every labeled output state after the shared circuit simulation:
+
+```commandline
+./SliQSim --sim_qasm examples/bell_state.qasm --type 1 --init_states init_states.txt
+```
+
+To access only some output states, pass `--select_init` with one label or a comma-separated list:
+
+```commandline
+./SliQSim --sim_qasm examples/bell_state.qasm --type 1 --init_states init_states.txt --select_init zero
+```
+
+The same access mechanism works with sampling, all-amplitude statevector extraction, and query mode. Internally, the labeled initial states are encoded with auxiliary Boolean selector variables, evolved in one BDD simulation, and projected by label when an output state is requested.
+
+Dense amplitude-vector entries use `2^n` amplitudes for an `n`-qubit circuit. Sparse entries use only the nonzero terms, written as `<bitstring>:<amplitude>`, and are recommended for large circuits such as `examples/bv100.qasm`. Real and complex values such as `0.5`, `-0.5`, `1i`, `-1i`, and `0.5+0.5i` are supported. Decimal amplitudes are stored in SliQSim's bit-sliced integer representation using fixed-point scaling, so values are approximate at the precision controlled by `--r`.
+
+To verify a multi-initial-state run, add `--sequential_init`. This runs the same selected labels one by one as independent simulations instead of using selector variables:
+
+```commandline
+./SliQSim --sim_qasm examples/bv100.qasm --shots 1 --seed 0 --init_states examples/bv100_sparse_arbitrary_init.txt --select_init arb00,arb02 --sequential_init
+```
+
+The output format is the same as the combined multi-initial-state mode, so selected labels can be compared directly.
+
+To have SliQSim perform that comparison automatically, use `--verify_init`:
+
+```commandline
+./SliQSim --sim_qasm examples/bv100.qasm --shots 1 --seed 0 --init_states examples/bv100_sparse_arbitrary_init.txt --select_init arb00,arb02 --verify_init
+```
+
+For sampling output, `--verify_init` first checks whether both modes produced the same set of selected labels and output bitstrings. It then converts counts to probabilities and compares every output bitstring for every selected label. The default tolerance is `1e-9`; override it with `--verify_tol` when comparing finite-shot samples:
+
+```commandline
+./SliQSim --sim_qasm examples/bv100.qasm --shots 1000 --seed 0 --init_states examples/bv100_sparse_arbitrary_init.txt --select_init arb00,arb02 --verify_init --verify_tol 0.05
+```
+
+This prints `{ "verification": "pass" }` when the support matches and the probability differences are within tolerance. If a label or output bitstring appears in one mode but not the other, the report includes `support_match: false`, `missing_from`, `missing_label`, and, when applicable, `missing_output`. If the outputs are not sampling counts, it falls back to exact output comparison.
+
+To inspect the BDDs, use `--dump_bdds` with a filename prefix:
+
+```commandline
+./SliQSim --sim_qasm examples/bell_state.qasm --type 1 --init_states init_states.txt --dump_bdds /tmp/sliqsim_bdd
+```
+
+This writes Graphviz `.dot` files such as:
+
+```text
+/tmp/sliqsim_bdd_initial_multi_input_slices.dot
+/tmp/sliqsim_bdd_final_multi_state_slices.dot
+/tmp/sliqsim_bdd_final_merged_all_in_one_bigBDD.dot
+```
+
+For a normal single-initial-state run, the corresponding files are:
+
+```text
+/tmp/sliqsim_bdd_initial_input_slices.dot
+/tmp/sliqsim_bdd_final_merged_bigBDD.dot
+```
+
+The slice files contain the `All_Bdd[component][bit]` roots (`c0_b0`, `c0_b1`, ...), and the merged file contains the `bigBDD` root used for measurement/probability traversal. For large circuits these files can be very large.
+
+To generate report-ready comparison statistics for SliQSim's all-in-one multi-initial-state mode, SliQSim's sequential mode, and MQT DDSIM's sequential simulation, use:
+
+```commandline
+python3 tools/compare_simulators.py --qasm examples/bell_state.qasm --init-states init_state/init_states.txt --type 1 --seed 0 --ddsim-timeout 30 --json-out /tmp/sliqsim_compare.json
+```
+
+The script prints Markdown tables with runtime, observed peak memory, SliQSim's reported runtime, SliQSim's max BDD nodes, DDSIM per-label runtime/depth/operation counts, and probability-agreement statistics. MQT DDSIM is run label by label because it does not use SliQSim's selector-variable multi-initial-state encoding. Basis initial states are supported directly. Arbitrary amplitude DDSIM initial states are attempted for every selected label by expanding the state vector and prepending an initialization circuit. To keep very large cases bounded, `--ddsim-timeout` sets a hard per-label DDSIM wall-time limit; labels that hit the limit or require an infeasible dense state vector are reported as aborted.
 
 For example, simulating `examples/bell_state_measure.qasm`, which is a 2-qubit bell state circuit with measurement gates at the end, with the sampling mode simulation option can be executed by
 ```commandline

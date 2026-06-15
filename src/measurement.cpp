@@ -302,30 +302,32 @@ void Simulator::measurement()
     
     // move measured qubits to the top
     int *permutation = new int[nVar];
-    int indCount1 = 0;
-    int indCount0 = 0;  // number of measured qubits
-    for (int i = 0; i < n; i++){
-        if (!measured_qubits_to_clbits[i].empty())
-        {
-            indCount0++;
-        }
-    }
-    for (int i = 0; i < n; i++)
+    std::vector<int> measured_vars;
+    std::vector<int> unmeasured_vars;
+    std::vector<int> auxiliary_vars;
+    for (int i = 0; i < nVar; i++)
     {
         int index = Cudd_ReadInvPerm(manager, i);
-        if (!measured_qubits_to_clbits[index].empty())
+        if (index < n)
         {
-            permutation[indCount1] = index;
-            indCount1++;
+            if (!measured_qubits_to_clbits[index].empty())
+                measured_vars.push_back(index);
+            else
+                unmeasured_vars.push_back(index);
         }
         else
         {
-            permutation[indCount0] = index;
-            indCount0++;
+            auxiliary_vars.push_back(index);
         }
     }
-    for (int i = n; i < nVar; i++)
-        permutation[i] = Cudd_ReadInvPerm(manager, i);      
+    int indCount1 = measured_vars.size();
+    int permIndex = 0;
+    for (int index : measured_vars)
+        permutation[permIndex++] = index;
+    for (int index : unmeasured_vars)
+        permutation[permIndex++] = index;
+    for (int index : auxiliary_vars)
+        permutation[permIndex++] = index;
     int dum = Cudd_ShuffleHeap(manager, permutation);
     Node_Table.clear();    // need to re-calculate
     nodecount();

@@ -17,6 +17,8 @@
 #include <random>
 #include <cmath>
 #include <vector>
+#include <set>
+#include <complex>
 #include <gmpxx.h>
 #include "../cudd/cudd/cudd.h"
 #include "../cudd/cudd/cuddInt.h"
@@ -50,13 +52,15 @@ class Simulator
 public:
     // constructor and destructor
     Simulator(int type, int nshots, int seed, int bitSize, bool reorder, bool isQuery, bool alloc) :
-        n(0), r(bitSize), w(4), k(0), inc(3), shift(0), error(0),
+        manager(nullptr), All_Bdd(nullptr), n(0), r(bitSize), w(4), k(0), inc(3), shift(0), error(0),
         normalize_factor(1), gatecount(0), NodeCount(0), isMeasure(0), isQuery(isQuery), shots(nshots), isReorder(reorder), isAlloc(alloc)
-        , sim_type(type), statevector("null"), gen(std::default_random_engine(seed)) {}
+        , nClbits(0), bigBDD(nullptr), sim_type(type), statevector("null"), gen(std::default_random_engine(seed)),
+        multiLabelBits(0), hasArbitraryInit(false), initScaleBits(0), baseAllBdd(nullptr) {}
     Simulator(int nshots, int seed, int bitSize, bool reorder, bool isQuery, bool alloc) :
-        n(0), r(bitSize), w(4), k(0), inc(3), shift(0), error(0),
+        manager(nullptr), All_Bdd(nullptr), n(0), r(bitSize), w(4), k(0), inc(3), shift(0), error(0),
         normalize_factor(1), gatecount(0), NodeCount(0), isMeasure(0), isQuery(isQuery), shots(nshots), isReorder(reorder), isAlloc(alloc)
-        , sim_type(0), statevector("null"), gen(std::default_random_engine(seed)) {}
+        , nClbits(0), bigBDD(nullptr), sim_type(0), statevector("null"), gen(std::default_random_engine(seed)),
+        multiLabelBits(0), hasArbitraryInit(false), initScaleBits(0), baseAllBdd(nullptr) {}
     ~Simulator()  {
         clear();
     }
@@ -83,9 +87,13 @@ public:
 
     /* simulation */
     void init_simulator(int n);
+    void set_multi_initial_states(std::string init_states);
+    void set_selected_initial_states(std::string selection);
+    void set_obs_file(std::string obsfile);
+    void set_bdd_dump_prefix(std::string prefix);
     void sim_qasm_file(std::string qasm);
     void sim_qasm(std::string qasm);
-    void print_results();
+    void print_results(std::string label = "");
 
     /* misc */
     void reorder();
@@ -116,6 +124,8 @@ private:
     std::unordered_map<DdNode *, double> Node_Table; // key: node, value: summed prob
     std::unordered_map<std::string, int> state_count;
     std::string statevector;
+    std::string obsfile;
+    std::string bddDumpPrefix;
     std::vector<std::tuple<std::string, std::string>> property;
     std::string run_output; // output string for Qiskit
     std::unordered_map<std::string, DdNode*> defined_var;
@@ -128,6 +138,14 @@ private:
     unsigned long gatecount;
     unsigned long NodeCount;
     double error;
+
+    std::vector<std::string> multiInitLabels;
+    std::vector<std::vector<std::string>> multiInitEntries;
+    std::vector<std::string> selectedInitLabels;
+    int multiLabelBits;
+    bool hasArbitraryInit;
+    int initScaleBits;
+    DdNode ***baseAllBdd;
 
     /* measurement */
     void create_bigBDD();
@@ -144,6 +162,14 @@ private:
 
     /* misc */
     void init_state(int *constants);
+    void init_multi_state();
+    void dump_all_bdds(std::string suffix);
+    void dump_big_bdd(std::string suffix);
+    bool has_multi_initial_states();
+    std::vector<std::string> labels_to_access();
+    bool select_initial_state(std::string label);
+    void restore_multi_state();
+    void reset_access_state();
     void alloc_BDD(DdNode ***Bdd, bool extend);
     void dropLSB(DdNode ***Bdd);
     int overflow3(DdNode *g, DdNode *h, DdNode *crin);
@@ -164,7 +190,7 @@ private:
         for (int i = 0; i < w; i++)
             delete[] All_Bdd[i];
         delete [] All_Bdd;
-        if (isMeasure == 1)
+        if (bigBDD)
             Cudd_RecursiveDeref(manager, bigBDD);
         for (auto& it: defined_var) {
             Cudd_RecursiveDeref(manager, it.second);
