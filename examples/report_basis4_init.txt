@@ -1,0 +1,4 @@
+zero 000
+one 001
+mid 010
+high 111
